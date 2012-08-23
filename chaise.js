@@ -52,7 +52,7 @@ function getReduces(couchDB, next) {
             res.on('data', function (chunk) { body += chunk });
             res.on('end', function() { callback(null, JSON.parse(body)) })
         }).on('error', function(e) { callback(e) })
-    }
+    };
 
     var getDesignDocs = function(callback) {
         http.get({
@@ -71,7 +71,7 @@ function getReduces(couchDB, next) {
             res.on('data', function (chunk) { body += chunk });
             res.on('end', function() { callback(null, JSON.parse(body)) })
         }).on('error', function(e) { callback(e) })
-    }
+    };
 
     getDesignDocs(function(err, docs) {
         if (err) return next(err);
@@ -104,7 +104,7 @@ function getReduces(couchDB, next) {
 
 // Ensure a database exists.
 function ensureDB(db, next) {
-
+    console.log('Creating %s', db.path);
     var getDB = function(callback) {
         http.get({
             host: db.host,
@@ -115,30 +115,25 @@ function ensureDB(db, next) {
                 return callback(new Error('Could not load db'));
             res.on('end', function() { callback(null) })
         }).on('error', function(e) { callback(e) })
-    }
+    };
 
     var createDB = function(callback) {
-        var uri = {
+        var req = http.request({
             method: 'PUT',
             host: db.host,
             port: db.port,
             path: db.path
-        };
-
-        var req = http.request(uri, function(res) {
+        }, function(res) {
             if (res.statusCode != 201)
                 return callback(new Error('Could not be created'));
             res.on('end', function() { callback(null) })
         })
         req.on('error', function(e) { callback(e) })
         req.end();
-    }
+    };
 
     getDB(function(err) {
-        if (err) {
-            console.log('Creating %s', db.path);
-            createDB(next)
-        }
+        if (err) return createDB(next);
         next();
     });
 }
@@ -157,51 +152,54 @@ function updateDestination(source, target, next) {
             res.on('data', function (chunk) { body += chunk });
             res.on('end', function() { callback(null, JSON.parse(body).rows) })
         }).on('error', function(e) { callback(e) })
-    }
+    };
 
-    var insert = function(data, callback) {
-        data = data.map(function(v) {
+    var prepare = function(data) {
+        var ts = +(new Date);
+        return data.map(function(v) {
             var key = v.key
             if (typeof key !== 'string' && key.join !== undefined) {
                 key = key.join('/');
             }
             v._id = "r/" + key;
+            v.timestamp = ts;
             return v;
         });
+    };
 
-        var uri = {
+    var insert = function(data, callback) {
+        var req = http.request({
             method: 'POST',
             host: target.host,
             port: target.port,
             path: target.path + '/_bulk_docs',
             headers: {'Content-Type': 'application/json'}
-        };
+        }, function(res) {
+            var body = '';
+            res.setEncoding('utf8');
+            res.on('data', function (chunk) { body += chunk });
+            res.on('end', function() {
+                if (!body) return callback(new Error('Bad response'));
+                body = JSON.parse(body);
+                if (res.statusCode != 201) {
+                    if (body.error)
+                        return callback(new Error(body.error +', '+ body.reason));
+                    return callback(new Error('Could not update documents'));
+                }
 
-        var req = http.request(uri, function(res) {
-            if (res.statusCode != 201) {
-                var body = '';
-                res.setEncoding('utf8');
-                res.on('data', function (chunk) { body += chunk });
-                res.on('end', function() {
-                    try {
-                        body = JSON.parse(body);
-                        var err = new Error(body.error +', '+ body.reason);
-                        return callback(err);
-                    } catch(e) {};
-                    callback(new Error('Could not update documents'));
-                });
-            }
-            else {
-                res.on('end', function() { callback(null) })
-            }
+                var errors = [];
+                body.forEach(function(v) { if (v.error) errors.push(v) });
+                callback(errors.length ? new Error('Completed with errors') : null);
+            });
+
         })
         req.on('error', function(e) { callback(e) })
         req.write(JSON.stringify({docs: data}));
         req.end();
-    }
+    };
 
     retrieve(function(err, data) {
         if (err) return next(err);
-        insert(data, next);
+        insert(prepare(data), next);
     });
 }
