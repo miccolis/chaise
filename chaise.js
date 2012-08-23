@@ -8,7 +8,7 @@ var couchDB
 try {
     couchDB = url.parse(process.argv[2]);
 }
-catch (e)
+catch (e) {
     console.error('Error: argument must be a valid URL');
     process.exit();
 }
@@ -162,7 +162,7 @@ function updateDestination(source, target, next) {
 
     var insert = function(data, callback) {
         data = data.map(function(v) {
-            v._id = v.key;
+            v._id = v.key.toString();;
             return v;
         });
 
