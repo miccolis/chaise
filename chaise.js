@@ -30,7 +30,6 @@ getReduces(couchDB, function(err, data) {
         ensureDB(target, function(err) {
             updateDestination(source, target, function(err) {
                 if (err) console.error(err);
-                console.log(arguments);
             })
         });
     });
@@ -162,7 +161,11 @@ function updateDestination(source, target, next) {
 
     var insert = function(data, callback) {
         data = data.map(function(v) {
-            v._id = v.key.toString();;
+            var key = v.key
+            if (typeof key !== 'string' && key.join !== undefined) {
+                key = key.join('/');
+            }
+            v._id = "r/" + key;
             return v;
         });
 
@@ -175,9 +178,22 @@ function updateDestination(source, target, next) {
         };
 
         var req = http.request(uri, function(res) {
-            if (res.statusCode != 201)
-                return callback(new Error('Could not update documents'));
-            res.on('end', function() { callback(null) })
+            if (res.statusCode != 201) {
+                var body = '';
+                res.setEncoding('utf8');
+                res.on('data', function (chunk) { body += chunk });
+                res.on('end', function() {
+                    try {
+                        body = JSON.parse(body);
+                        var err = new Error(body.error +', '+ body.reason);
+                        return callback(err);
+                    } catch(e) {};
+                    callback(new Error('Could not update documents'));
+                });
+            }
+            else {
+                res.on('end', function() { callback(null) })
+            }
         })
         req.on('error', function(e) { callback(e) })
         req.write(JSON.stringify({docs: data}));
