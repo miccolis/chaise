@@ -104,7 +104,6 @@ function getReduces(couchDB, next) {
 
 // Ensure a database exists.
 function ensureDB(db, next) {
-    console.log('Creating %s', db.path);
     var getDB = function(callback) {
         http.get({
             host: db.host,
@@ -118,6 +117,7 @@ function ensureDB(db, next) {
     };
 
     var createDB = function(callback) {
+        console.log('Creating %s', db.path);
         var req = http.request({
             method: 'PUT',
             host: db.host,
@@ -142,21 +142,9 @@ function ensureDB(db, next) {
 function updateDestination(source, target, next) {
     // TODO make this streaming.
 
-    var retrieve = function(callback) {
-        http.get(source, function(res) {
-            if (res.statusCode != 200)
-                return callback(new Error('Could not load doc'));
-
-            var body = '';
-            res.setEncoding('utf8');
-            res.on('data', function (chunk) { body += chunk });
-            res.on('end', function() { callback(null, JSON.parse(body).rows) })
-        }).on('error', function(e) { callback(e) })
-    };
-
     var prepare = function(data) {
         var ts = +(new Date);
-        return data.map(function(v) {
+        return data.rows.map(function(v) {
             var key = v.key
             if (typeof key !== 'string' && key.join !== undefined) {
                 key = key.join('/');
@@ -165,6 +153,42 @@ function updateDestination(source, target, next) {
             v.timestamp = ts;
             return v;
         });
+    };
+
+    var retrieve = function(callback) {
+        http.get(source, function(res) {
+            if (res.statusCode != 200)
+                return callback(new Error('Could not load doc'));
+
+            var body = '';
+            res.setEncoding('utf8');
+            res.on('data', function (chunk) { body += chunk });
+            res.on('end', function() { callback(null, JSON.parse(body)) })
+        }).on('error', function(e) { callback(e) })
+    };
+
+
+    var revisions = function(data, callback) {
+        var req = http.request({
+            method: 'POST',
+            host: target.host,
+            port: target.port,
+            path: target.path + '/_all_docs',
+            headers: {'Content-Type': 'application/json'}
+        }, function(res) {
+            var body = '';
+            res.setEncoding('utf8');
+            res.on('data', function (chunk) { body += chunk });
+            res.on('end', function() {
+                if (res.statusCode != 200 || !body)
+                    return callback(new Error('Bad response'));
+                body = JSON.parse(body);
+                callback(null, body);
+            });
+        });
+        req.on('error', function(e) { callback(e) })
+        req.write(JSON.stringify({"keys": data}));
+        req.end();
     };
 
     var insert = function(data, callback) {
@@ -200,6 +224,14 @@ function updateDestination(source, target, next) {
 
     retrieve(function(err, data) {
         if (err) return next(err);
-        insert(prepare(data), next);
+        data = prepare(data);
+
+        var ids = data.map(function(v) { return v._id; });
+        revisions(ids, function(err, docs) {
+            var idMap = {};
+            docs.rows.forEach(function(v) { idMap[v.id] = v.value.rev });
+            data = data.map(function(v) { v._rev = idMap[v._id]; return v; });
+            insert(data, next);
+        });
     });
 }
