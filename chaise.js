@@ -116,6 +116,34 @@ function ensureDB(db, next) {
         }).on('error', function(e) { callback(e) })
     };
 
+    var createDesign = function(callback) {
+        var ddoc = {
+           "_id": "_design/chaise",
+           "language": "javascript",
+           "views": {
+               "time": {
+                   "map": "function(doc) {\n  emit(doc.timestamp, {_id: doc._id, _rev: doc._rev});\n}"
+               }
+           }
+        };
+
+        var req = http.request({
+            method: 'PUT',
+            host: db.host,
+            port: db.port,
+            path: db.path + '/_design/chaise'
+        }, function(res) {
+            if (res.statusCode != 201)
+                return callback(new Error('Could not be created'));
+            res.on('end', function() {
+                callback(null)
+            });
+        });
+        req.on('error', function(e) { callback(e) })
+        req.write(JSON.stringify(ddoc));
+        req.end();
+    };
+
     var createDB = function(callback) {
         console.log('Creating %s', db.path);
         var req = http.request({
@@ -133,17 +161,23 @@ function ensureDB(db, next) {
     };
 
     getDB(function(err) {
-        if (err) return createDB(next);
-        next();
+        if (!err) return next();
+        createDB(function(err) {
+            if (err) return next(err);
+            createDesign(function(err) {
+                if (err) return next(err);
+                next();
+            });
+        });
     });
 }
 
 // Takes results from a view and write then to a db.
 function updateDestination(source, target, next) {
+    var ts = +(new Date);
     // TODO make this streaming.
 
     var prepare = function(data) {
-        var ts = +(new Date);
         return data.rows.map(function(v) {
             var key = v.key
             if (typeof key !== 'string' && key.join !== undefined) {
@@ -167,8 +201,7 @@ function updateDestination(source, target, next) {
         }).on('error', function(e) { callback(e) })
     };
 
-
-    var revisions = function(data, callback) {
+    var getRevisions = function(data, callback) {
         var req = http.request({
             method: 'POST',
             host: target.host,
@@ -182,12 +215,32 @@ function updateDestination(source, target, next) {
             res.on('end', function() {
                 if (res.statusCode != 200 || !body)
                     return callback(new Error('Bad response'));
-                body = JSON.parse(body);
-                callback(null, body);
+                callback(null, JSON.parse(body));
             });
         });
         req.on('error', function(e) { callback(e) })
-        req.write(JSON.stringify({"keys": data}));
+        req.write(JSON.stringify(data));
+        req.end();
+    };
+
+    var getObsolete = function(callback) {
+        var req = http.request({
+            method: 'GET',
+            host: target.host,
+            port: target.port,
+            path: util.format('%s/_design/chaise/_view/time?endkey=%s', target.path, ts - 1),
+            headers: {'Content-Type': 'application/json'}
+        }, function(res) {
+            var body = '';
+            res.setEncoding('utf8');
+            res.on('data', function (chunk) { body += chunk });
+            res.on('end', function() {
+                if (res.statusCode != 200 || !body)
+                    return callback(new Error('Bad response'));
+                callback(null, JSON.parse(body));
+            });
+        });
+        req.on('error', function(e) { callback(e) })
         req.end();
     };
 
@@ -222,16 +275,37 @@ function updateDestination(source, target, next) {
         req.end();
     };
 
+    var cleanup = function(callback) {
+        getObsolete(function(err, docs) {
+            if (err) return callback(err);
+            var data = docs.rows.map(function(v) {
+                v.value._deleted = true;
+                return v.value;
+            });
+            insert(data, function(err) {
+                callback(err);
+            });
+        });
+    };
+
     retrieve(function(err, data) {
         if (err) return next(err);
         data = prepare(data);
 
         var ids = data.map(function(v) { return v._id; });
-        revisions(ids, function(err, docs) {
-            var idMap = {};
-            docs.rows.forEach(function(v) { idMap[v.id] = v.value.rev });
-            data = data.map(function(v) { v._rev = idMap[v._id]; return v; });
-            insert(data, next);
+        getRevisions({"keys": ids}, function(err, docs) {
+            if (err) return next(err);
+            if (docs.rows.length) {
+                var idMap = {};
+                docs.rows.forEach(function(v) {
+                    if (!v.error) idMap[v.id] = v.value.rev
+                });
+                data = data.map(function(v) { v._rev = idMap[v._id]; return v; });
+            }
+            insert(data, function(err) {
+                if (err) return next(err);
+                cleanup(next);
+            });
         });
     });
 }
