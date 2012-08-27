@@ -4,48 +4,75 @@ var util = require('util');
 var http = require('http');
 var url = require('url');
 
-var couchDB
+var couchDB;
 try {
     couchDB = url.parse(process.argv[2]);
 }
 catch (e) {
-    console.error('Error: argument must be a valid URL');
+    console.error('error: source must be a valid url');
     process.exit();
 }
 
-getReduces(couchDB, function(err, data) {
-    if (err) throw err;
-    data.forEach(function(v) {
-        var source = {
-            host: couchDB.hostname,
-            port: couchDB.port,
-            path: util.format('%s/%s/_view/%s?group=true',
-                couchDB.pathname, v.id, v.view) 
-        };
-        var target = {
-            host: couchDB.hostname,
-            port: couchDB.port,
-            path: '/' + v.target
-        };
-        ensureDB(target, function(err) {
-            updateDestination(source, target, function(err) {
-                if (err) console.error(err);
-            })
+if (process.argv.length == 3) {
+    // Reclining use: simple reduce instruction stored within the design doc.
+    getReduces(couchDB, function(err, data) {
+        if (err) throw err;
+        data.forEach(function(v) {
+            var target = {
+                hostname: couchDB.hostname,
+                port: couchDB.port,
+                path: '/' + v.target
+            };
+            ensureDB(target, function(err) {
+                if (err) return console.error(err);
+                var source = {
+                    hostname: couchDB.hostname,
+                    port: couchDB.port,
+                    path: util.format('%s/%s/_view/%s?group=true',
+                        couchDB.pathname, v.id, v.view)
+                };
+                updateDestination(source, target, function(err) {
+                    if (err) console.error(err);
+                })
+            });
         });
     });
-});
+}
+else if (process.argv.length == 4) {
+    // Sitting up: explicity declare the source URI.
+    var destDB;
+    try {
+        destDB = url.parse(process.argv[3]);
+    }
+    catch (e) {
+        console.error('error: destination must be a valid url');
+        process.exit();
+    }
+
+    ensureDB(destDB, function(err) {
+        if (err) return console.error(err);
+        updateDestination(couchDB, destDB, function(err) {
+            if (err) console.error(err);
+        })
+    });
+}
+else {
+    console.error('error: bad arguments');
+    process.exit();
+}
+
 
 // Find reduces to save.
 function getReduces(couchDB, next) {
 
     var getDesignDoc = function(docname, callback) {
         http.get({
-            host: couchDB.hostname,
+            hostname: couchDB.hostname,
             port: couchDB.port,
             path: couchDB.pathname + '/' + docname
         }, function(res) {
             if (res.statusCode != 200)
-                return callback(new Error('Could not load doc'));
+                return callback(new Error('Could not load design doc'));
 
             var body = '';
             res.setEncoding('utf8');
@@ -56,7 +83,7 @@ function getReduces(couchDB, next) {
 
     var getDesignDocs = function(callback) {
         http.get({
-            host: couchDB.hostname,
+            hostname: couchDB.hostname,
             port: couchDB.port,
             path: url.format({
                 pathname: couchDB.pathname + '/_all_docs',
@@ -64,7 +91,7 @@ function getReduces(couchDB, next) {
             })
         }, function(res) {
             if (res.statusCode != 200)
-                return callback(new Error('Could not load docs'));
+                return callback(new Error('Could not load design docs'));
 
             var body = '';
             res.setEncoding('utf8');
@@ -105,11 +132,7 @@ function getReduces(couchDB, next) {
 // Ensure a database exists.
 function ensureDB(db, next) {
     var getDB = function(callback) {
-        http.get({
-            host: db.host,
-            port: db.port,
-            path: db.path
-        }, function(res) {
+        http.get(db, function(res) {
             if (res.statusCode != 200)
                 return callback(new Error('Could not load db'));
             res.on('end', function() { callback(null) })
@@ -129,7 +152,7 @@ function ensureDB(db, next) {
 
         var req = http.request({
             method: 'PUT',
-            host: db.host,
+            hostname: db.hostname,
             port: db.port,
             path: db.path + '/_design/chaise'
         }, function(res) {
@@ -148,7 +171,7 @@ function ensureDB(db, next) {
         console.log('Creating %s', db.path);
         var req = http.request({
             method: 'PUT',
-            host: db.host,
+            hostname: db.hostname,
             port: db.port,
             path: db.path
         }, function(res) {
@@ -164,10 +187,7 @@ function ensureDB(db, next) {
         if (!err) return next();
         createDB(function(err) {
             if (err) return next(err);
-            createDesign(function(err) {
-                if (err) return next(err);
-                next();
-            });
+            createDesign(next);
         });
     });
 }
@@ -192,7 +212,7 @@ function updateDestination(source, target, next) {
     var retrieve = function(callback) {
         http.get(source, function(res) {
             if (res.statusCode != 200)
-                return callback(new Error('Could not load doc'));
+                return callback(new Error('Could not load source data'));
 
             var body = '';
             res.setEncoding('utf8');
@@ -204,7 +224,7 @@ function updateDestination(source, target, next) {
     var getRevisions = function(data, callback) {
         var req = http.request({
             method: 'POST',
-            host: target.host,
+            hostname: target.hostname,
             port: target.port,
             path: target.path + '/_all_docs',
             headers: {'Content-Type': 'application/json'}
@@ -226,7 +246,7 @@ function updateDestination(source, target, next) {
     var getObsolete = function(callback) {
         var req = http.request({
             method: 'GET',
-            host: target.host,
+            hostname: target.hostname,
             port: target.port,
             path: util.format('%s/_design/chaise/_view/time?endkey=%s', target.path, ts - 1),
             headers: {'Content-Type': 'application/json'}
@@ -247,7 +267,7 @@ function updateDestination(source, target, next) {
     var insert = function(data, callback) {
         var req = http.request({
             method: 'POST',
-            host: target.host,
+            hostname: target.hostname,
             port: target.port,
             path: target.path + '/_bulk_docs',
             headers: {'Content-Type': 'application/json'}
