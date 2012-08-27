@@ -139,6 +139,34 @@ function ensureDB(db, next) {
         }).on('error', function(e) { callback(e) })
     };
 
+    var createDB = function(callback) {
+        console.log('Creating %s', db.path);
+        var req = http.request({
+            method: 'PUT',
+            hostname: db.hostname,
+            port: db.port,
+            path: db.path
+        }, function(res) {
+            if (res.statusCode != 201)
+                return callback(new Error('Could not be created'));
+            res.on('end', function() { callback(null) })
+        })
+        req.on('error', function(e) { callback(e) })
+        req.end();
+    };
+
+    var getDesign = function(callback) {
+        http.get({
+            hostname: db.hostname,
+            port: db.port,
+            path: db.path + '/_design/chaise',
+        }, function(res) {
+            if (res.statusCode != 200)
+                return callback(new Error('Could not load design doc'));
+            res.on('end', function() { callback(null) })
+        }).on('error', function(e) { callback(e) })
+
+    }
     var createDesign = function(callback) {
         var ddoc = {
            "_id": "_design/chaise",
@@ -167,26 +195,17 @@ function ensureDB(db, next) {
         req.end();
     };
 
-    var createDB = function(callback) {
-        console.log('Creating %s', db.path);
-        var req = http.request({
-            method: 'PUT',
-            hostname: db.hostname,
-            port: db.port,
-            path: db.path
-        }, function(res) {
-            if (res.statusCode != 201)
-                return callback(new Error('Could not be created'));
-            res.on('end', function() { callback(null) })
-        })
-        req.on('error', function(e) { callback(e) })
-        req.end();
-    };
-
     getDB(function(err) {
-        if (!err) return next();
-        createDB(function(err) {
-            if (err) return next(err);
+        if (err) {
+            // No database, create it and the design doc.
+            return createDB(function(err) {
+                if (err) return next(err);
+                createDesign(next);
+            });
+        }
+        // Found the database, but we may need to make the design doc.
+        getDesign(function(err) {
+            if (!err) return next();
             createDesign(next);
         });
     });
